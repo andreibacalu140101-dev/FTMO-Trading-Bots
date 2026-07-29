@@ -25,7 +25,7 @@ input int         InpEndHour = 17;            // Hora de fin (CET)
 input double      InpMaxSpreadPips = 1.5;     // Máximo Spread Permitido (Pips)
 
 sinput string     Section3 = "=== Configuración Estrategia SMC ===";
-input ulong       InpMagicNumber = 777123;    // Magic Number
+input ulong       InpMagicNumber = 444123;    // Magic Number
 input ulong       InpMaxSlippagePoints = 30;  // Slippage Máximo (Puntos)
 
 //--- Variables Globales

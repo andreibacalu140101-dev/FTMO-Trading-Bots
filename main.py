@@ -187,11 +187,36 @@ def main():
                 
                 # PASO 3: Evaluación Símbolo a Símbolo
                 for symbol in symbols_to_trade:
+                    # A. Filtro Institucional de Spread en Vivo
+                    tick = mt5.symbol_info_tick(symbol)
+                    symbol_info = mt5.symbol_info(symbol)
+                    
+                    if tick is None or symbol_info is None:
+                        continue
+                        
+                    pip_size = 10 * symbol_info.point if (symbol_info.digits == 5 or symbol_info.digits == 3) else symbol_info.point
+                    current_spread_pips = (tick.ask - tick.bid) / pip_size
+                    
+                    if current_spread_pips > getattr(config, 'MAX_SPREAD_PIPS', 1.5):
+                        # Spread brutal detectado, descartar este símbolo en esta iteración
+                        continue
+                        
                     # Obtener 100 velas (Suficiente para EMAs grandes como la de 200 en H1)
                     # Usamos M15 por defecto, aunque cada estrategia podría requerir su propio timeframe
                     # Aquí estandarizamos a la obtención de velas solicitada.
                     df = fetch_rates_with_retry(symbol, getattr(config, 'TIMEFRAME', mt5.TIMEFRAME_M15), 300)
-                    if df is None:
+                    if df is None or len(df) < 15:
+                        continue
+                        
+                    # B. Filtro MACRO de Volatilidad (ATR de 14 periodos)
+                    df['tr0'] = abs(df['high'] - df['low'])
+                    df['tr1'] = abs(df['high'] - df['close'].shift())
+                    df['tr2'] = abs(df['low'] - df['close'].shift())
+                    tr = df[['tr0', 'tr1', 'tr2']].max(axis=1)
+                    atr_14 = tr.rolling(14).mean().iloc[-1] / pip_size
+                    
+                    if atr_14 < getattr(config, 'MIN_ATR_PIPS', 3.0):
+                        # Mercado en rango estrecho sin direccionalidad, abortar
                         continue
                         
                     best_signal = None

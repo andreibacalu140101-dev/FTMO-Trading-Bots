@@ -136,17 +136,15 @@ class FTMORiskManager:
             if not in_session:
                 # 🌟 Excepciones Seguras Fuera de Horario
                 strategy_name = signal_dict.get('strategy_name', '')
-                rr_ratio = signal_dict.get('rr_ratio', 0)
                 
-                # Criterio de QA Quant: Solo permitir NightScalper o trades con R:R >= 2.0
-                is_night_scalper = (strategy_name == "NightScalper")
-                is_high_probability = (rr_ratio >= 2.0)
+                # Criterio Institucional: Solo permitir NightScalper fuera de horario.
+                is_night_scalper = (strategy_name == "NightScalper" or strategy_name == "Night_Scalper")
                 
-                if not (is_night_scalper or is_high_probability):
-                    print(f"⏳ Fuera de horario ({config.TRADING_START_HOUR}:00-{config.TRADING_END_HOUR}:00 CET). Trade denegado en {symbol} ({strategy_name} R:R={rr_ratio:.2f}).")
+                if not is_night_scalper:
+                    print(f"⏳ Fuera de sesión ({config.TRADING_START_HOUR}:00-{config.TRADING_END_HOUR}:00). Trade {strategy_name} bloqueado en {symbol}.")
                     return False
                 else:
-                    print(f"🌟 Excepción Nocturna Aprobada en {symbol}: Estrategia {strategy_name} (R:R={rr_ratio:.2f}) superó el filtro cuantitativo.")
+                    print(f"🌟 Excepción Nocturna Autorizada en {symbol}: {strategy_name} diseñada para baja volatilidad.")
 
         # 2. Si el Kill Switch está activo, se rechaza cualquier trade
         if not self.trading_allowed:

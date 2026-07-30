@@ -42,6 +42,10 @@ RISK_PER_TRADE_PERCENT: float = 0.5
 # Límite duro diario en USD para proteger el límite de $400 de FTMO
 MAX_DAILY_LOSS_USD: float = 380.0
 
+# Filtros Institucionales de Mercado
+MAX_SPREAD_PIPS: float = 1.5
+MIN_ATR_PIPS: float = 3.0 # Volatilidad mínima requerida (M15) para operar
+
 # ==========================================
 # 🌐 HORARIOS DE OPERACIÓN (SESIONES)
 # ==========================================

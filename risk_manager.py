@@ -126,9 +126,16 @@ class FTMORiskManager:
 
     def can_open_trade(self, symbol) -> bool:
         """
-        Verifica el Kill Switch y la matriz de correlación antes de autorizar un trade.
+        Verifica el horario operativo, el Kill Switch y la matriz de correlación antes de autorizar un trade.
         """
-        # Si el Kill Switch está activo, se rechaza cualquier trade
+        # 1. Filtro Global de Horario Operativo (CET/CEST)
+        current_hour = self._get_cet_time().hour
+        if hasattr(config, 'TRADING_START_HOUR') and hasattr(config, 'TRADING_END_HOUR'):
+            if not (config.TRADING_START_HOUR <= current_hour < config.TRADING_END_HOUR):
+                print(f"⏳ Fuera de horario operativo ({config.TRADING_START_HOUR}:00-{config.TRADING_END_HOUR}:00 CET). Trade denegado en {symbol}.")
+                return False
+
+        # 2. Si el Kill Switch está activo, se rechaza cualquier trade
         if not self.trading_allowed:
             return False
             

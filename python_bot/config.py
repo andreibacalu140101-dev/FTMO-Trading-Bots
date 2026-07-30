@@ -1,43 +1,68 @@
-# python_bot/config.py
 import MetaTrader5 as mt5
+from typing import List, Dict
 
-# Credenciales de MT5 (Opcional, dejar vacío si ya está logueado en la terminal local)
-MT5_ACCOUNT = 0
-MT5_PASSWORD = ""
-MT5_SERVER = ""
+# ==========================================
+# ⚙️ CONFIGURACIÓN DEL ENTORNO METATRADER 5
+# ==========================================
+# (Opcional: Dejar vacío si la terminal ya está abierta y logueada)
+MT5_ACCOUNT: int = 0
+MT5_PASSWORD: str = ""
+MT5_SERVER: str = ""
 
-# Gestión de Riesgo Global
-MAGIC_NUMBER = 777000
-DAILY_DRAWDOWN_LIMIT = 400.0  # Regla dura de FTMO
-HARD_STOP_LIMIT = 380.0       # Panic Button Limit para evitar slippage
-RISK_PER_TRADE_USD = 50.0
-MAX_SPREAD_PIPS = 1.5         # Máximo spread permitido para entrar
+# ==========================================
+# 🤖 IDENTIFICADORES DEL BOT
+# ==========================================
+# Número mágico para aislar las operaciones de este bot de la operativa manual
+MAGIC_NUMBER: int = 777777
 
-# Zona Horaria (Broker) - FTMO usa huso horario CET/CEST
-BROKER_TIMEZONE = "Europe/Prague"
+# ==========================================
+# 📈 UNIVERSO DE ACTIVOS (SÍMBOLOS)
+# ==========================================
+# Lista principal de activos donde operarán las 7 estrategias
+SYMBOLS: List[str] = [
+    "EURUSD",
+    "GBPUSD",
+    "USDJPY",
+    "XAUUSD",
+    "US30"
+]
 
-# Horarios de Trading Estrictos (CET)
-TRADING_HOURS = {
-    "start": "08:00",
-    "end": "17:00"
-}
+# Temporizador del main loop (en segundos)
+TICK_SLEEP: float = 1.0
 
-# Matriz de Exposición y Correlación
-# Máximo 2 trades activos por moneda en toda la cuenta.
-CURRENCY_EXPOSURE_GROUPS = {
-    "USD": ["EURUSD", "GBPUSD", "AUDUSD", "NZDUSD", "USDCAD", "USDCHF", "USDJPY"],
+# ==========================================
+# 🛡️ GESTIÓN DE RIESGO Y FTMO ($10,000)
+# ==========================================
+# Porcentaje de la cuenta a arriesgar por trade (0.5% = $50 en cuenta de 10k)
+RISK_PER_TRADE_PERCENT: float = 0.5 
+
+# Límite duro diario en USD para proteger el límite de $400 de FTMO
+MAX_DAILY_LOSS_USD: float = 380.0
+
+# ==========================================
+# 🌐 HORARIOS DE OPERACIÓN (SESIONES)
+# ==========================================
+# FTMO utiliza los servidores de Praga/Berlín para sus cortes diarios
+BROKER_TIMEZONE: str = "Europe/Prague"
+
+# Restricción de operativa (Ej: Solo Sesión de NY o Londres cruzada)
+TRADING_START_HOUR: int = 8
+TRADING_END_HOUR: int = 17
+
+# ==========================================
+# ⚖️ MATRIZ DE EXPOSICIÓN (CORRELACIÓN)
+# ==========================================
+# Define la correlación sectorial. El Risk Manager (risk_manager.py) bloqueará 
+# nuevas posiciones si una divisa base/cotizada específica alcanza 2 operaciones simultáneas.
+CURRENCY_EXPOSURE_GROUPS: Dict[str, List[str]] = {
+    "USD": ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "US30", "USDCAD", "USDCHF"],
     "EUR": ["EURUSD", "EURGBP", "EURJPY", "EURAUD", "EURCAD", "EURCHF"],
     "GBP": ["GBPUSD", "EURGBP", "GBPJPY", "GBPAUD", "GBPCAD", "GBPCHF"],
     "JPY": ["USDJPY", "EURJPY", "GBPJPY", "AUDJPY", "CADJPY", "CHFJPY"],
     "AUD": ["AUDUSD", "EURAUD", "GBPAUD", "AUDJPY", "AUDCAD", "AUDCHF"],
     "CAD": ["USDCAD", "EURCAD", "GBPCAD", "CADJPY", "AUDCAD", "CADCHF"],
     "CHF": ["USDCHF", "EURCHF", "GBPCHF", "CHFJPY", "AUDCHF", "CADCHF"],
-    "NZD": ["NZDUSD", "EURNZD", "GBPNZD", "NZDJPY", "AUDNZD", "NZDCAD", "NZDCHF"]
+    "NZD": ["NZDUSD", "EURNZD", "GBPNZD", "NZDJPY", "AUDNZD", "NZDCAD", "NZDCHF"],
+    "METALS": ["XAUUSD", "XAGUSD"],
+    "INDICES": ["US30", "NAS100", "GER40"]
 }
-
-# Símbolos a operar
-SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY"]
-
-# Temporizadores y Concurrencia
-TIMEFRAME = mt5.TIMEFRAME_M5
-TICK_SLEEP = 1.0 # Segundos de espera en el bucle principal

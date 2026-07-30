@@ -1,55 +1,63 @@
 # python_bot/strategies/__init__.py
 from abc import ABC, abstractmethod
 import pandas as pd
+import numpy as np
 
 class BaseStrategy(ABC):
     """
-    Clase base para todas las estrategias cuantitativas.
-    Implementa reglas Anti-Repaint y un formato estándar de señal.
+    Clase base para todas las estrategias cuantitativas vectorizadas.
     """
     
     def __init__(self, name="Base"):
         self.name = name
-        self.last_signal_time = None
         
     @abstractmethod
-    def generate_signal(self, df, symbol):
+    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Lógica interna de la estrategia. 
-        Debe devolver un diccionario con la señal o None.
-        Ejemplo de retorno:
-        {
-            "signal_type": "BUY", # o "SELL"
-            "entry": 1.0500,
-            "sl": 1.0480,
-            "tp": 1.0540,
-            "rr_ratio": 2.0
-        }
+        Lógica vectorial pura (sin bucles for).
+        Debe devolver el mismo DataFrame añadiendo las columnas:
+        - 'signal' (1 = Compra, -1 = Venta, 0 = Neutral)
+        - 'sl' (Stop Loss price)
+        - 'tp' (Take Profit price)
+        - 'rr_ratio' (Risk:Reward Ratio esperado)
         """
         pass
         
     def evaluate(self, df: pd.DataFrame, symbol: str):
         """
-        Evalúa el DataFrame aplicando estrictamente reglas Anti-Repaint.
-        Solo evalúa sobre velas cerradas y evita generar señales múltiples en la misma vela.
+        Puente hacia el orquestador main.py. Ejecuta la vectorización 
+        y extrae únicamente la vela cerrada válida (índice -2).
         """
         if df is None or len(df) < 2:
             return None
             
-        # 1. Regla Anti-Repaint: Extraemos la vela recién cerrada (índice -2)
-        # La vela en curso (índice -1) todavía se está formando y su cierre no es definitivo.
-        closed_candle_time = df.iloc[-2]['time']
+        # Ejecutar la lógica vectorial completa
+        df = self.generate_signals(df.copy())
         
-        # 2. Control de Frecuencia: No emitir señal dos veces para la misma vela
-        if self.last_signal_time == closed_candle_time:
-            return None
-            
-        # 3. Delegar a la lógica específica de la estrategia
-        signal = self.generate_signal(df, symbol)
+        # Extraer la fila de la última vela cerrada (-2) para Anti-Repaint
+        closed_candle = df.iloc[-2]
         
-        # 4. Registrar timestamp si hay señal para evitar repintado/spam
-        if signal is not None:
-            self.last_signal_time = closed_candle_time
-            signal['strategy_name'] = self.name
+        # Si la señal no es 0 (Neutral) y las columnas requeridas existen
+        if closed_candle.get('signal', 0) != 0:
+            signal_type = "BUY" if closed_candle['signal'] == 1 else "SELL"
             
-        return signal
+            # Generar el diccionario esperado por main.py
+            return {
+                "signal_type": signal_type,
+                "entry": closed_candle['close'],
+                "sl": closed_candle.get('sl', 0.0),
+                "tp": closed_candle.get('tp', 0.0),
+                "rr_ratio": closed_candle.get('rr_ratio', 2.0),
+                "strategy_name": self.name
+            }
+            
+        return None
+
+from .hidden_divergence import HiddenDivergenceStrategy
+from .ny_orb import NY_ORB_Strategy
+from .night_scalper import NightScalperStrategy
+from .smc_fvg import SMC_FVG_Strategy
+from .trend_momentum import TrendMomentumStrategy
+from .vwap_pullback import VWAP_Pullback_Strategy
+from .volatility_breakout import VolatilityBreakoutStrategy
+

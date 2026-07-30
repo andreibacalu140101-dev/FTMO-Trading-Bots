@@ -37,7 +37,7 @@ def run_simulation():
     final_report = []
     
     print("="*50)
-    print("🧪 INICIANDO BACKTEST SIMULATOR (7 Días - M5)")
+    print("🧪 INICIANDO BACKTEST SIMULATOR INSTITUCIONAL (7 Días)")
     print("="*50)
     
     for symbol in symbols:
@@ -58,34 +58,9 @@ def run_simulation():
         # Buffer de Riesgo: (Spread * punto) + (0.5 * ATR)
         df['spread_price'] = df['spread'] * symbol_info.point
         df['buffer'] = df['spread_price'] + (0.5 * df['atr'])
-        
-        # Simulación de Franjas Horarias
         df['time_str'] = df['time'].dt.strftime('%H:%M')
         
-        def is_valid_window(t_str):
-            h, m = map(int, t_str.split(':'))
-            # Night Scalper: 23:00-02:00
-            if h >= 23 or h < 2: return True
-            # SMC FVG: 08:30-11:30
-            if (h == 8 and m >= 30) or (h > 8 and h < 11) or (h == 11 and m <= 30): return True
-            # NY ORB: 14:30-16:30
-            if (h == 14 and m >= 30) or (h == 15) or (h == 16 and m <= 30): return True
-            return False
-            
-        df['valid_window'] = df['time_str'].apply(is_valid_window)
-        
-        # Generar Señales Dummy (Cruce de EMAs) solo en ventanas válidas
-        df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
-        df['ema21'] = df['close'].ewm(span=21, adjust=False).mean()
-        df['signal'] = 0
-        
-        buy_cross = (df['ema9'].shift(1) < df['ema21'].shift(1)) & (df['ema9'] > df['ema21'])
-        sell_cross = (df['ema9'].shift(1) > df['ema21'].shift(1)) & (df['ema9'] < df['ema21'])
-        
-        df.loc[buy_cross & df['valid_window'], 'signal'] = 1
-        df.loc[sell_cross & df['valid_window'], 'signal'] = -1
-        
-        # Motor de Evaluación y Límite FTMO
+        # Variables de Simulación
         open_trades = []
         daily_pnl = {}
         total_trades = 0
@@ -95,67 +70,143 @@ def run_simulation():
         
         risk_usd = 50.0 # 0.5% de $10,000
         reward_usd = 100.0 # Ratio 1:2
-        
-        # SL Tradicional simulado: 10 pips para EURUSD, 30 pips para XAUUSD
         base_sl_dist = 10 * pip_size if symbol == 'EURUSD' else 30 * pip_size
         
-        for i in range(len(df)):
+        # Variables de estado diario
+        current_day = ""
+        trades_today = 0
+        
+        # Estado FVG
+        active_bull_fvg = None
+        active_bear_fvg = None
+        
+        # Estado ORB
+        orb_high = -np.inf
+        orb_low = np.inf
+        orb_active = False
+
+        for i in range(2, len(df)):
             row = df.iloc[i]
-            day_str = row['time'].strftime('%Y-%m-%d')
+            prev1 = df.iloc[i-1] # Vela 2
+            prev2 = df.iloc[i-2] # Vela 1
             
+            day_str = row['time'].strftime('%Y-%m-%d')
+            h = row['time'].hour
+            m = row['time'].minute
+            t_str = row['time_str']
+            
+            # Reset diario
+            if day_str != current_day:
+                current_day = day_str
+                trades_today = 0
+                active_bull_fvg = None
+                active_bear_fvg = None
+                orb_high = -np.inf
+                orb_low = np.inf
+                orb_active = False
+                
             if day_str not in daily_pnl:
                 daily_pnl[day_str] = 0.0
                 
-            # Restricción FTMO (Kill Switch Diario)
+            # Restricción FTMO (Kill Switch)
             if daily_pnl[day_str] <= -380.0:
                 continue
                 
-            # Procesar trades abiertos
+            # ---------------------------------------------------------
+            # 1. ACTUALIZAR POSICIONES ABIERTAS
+            # ---------------------------------------------------------
             for trade in open_trades[:]:
-                # Verificar si habría tocado el SL Tradicional
                 if not trade['hit_trad_sl']:
                     if trade['type'] == 'BUY' and row['low'] <= trade['sl_trad']:
                         trade['hit_trad_sl'] = True
                     elif trade['type'] == 'SELL' and row['high'] >= trade['sl_trad']:
                         trade['hit_trad_sl'] = True
 
-                # Verificar SL Institucional y TP
                 if trade['type'] == 'BUY':
                     if row['low'] <= trade['sl_inst']:
                         daily_pnl[day_str] -= risk_usd
-                        if trade['hit_trad_sl']:
-                            trad_sl_hit_count += 1
+                        if trade['hit_trad_sl']: trad_sl_hit_count += 1
                         open_trades.remove(trade)
                     elif row['high'] >= trade['tp']:
                         daily_pnl[day_str] += reward_usd
                         wins += 1
-                        if trade['hit_trad_sl']:
-                            saved_by_buffer_count += 1
+                        if trade['hit_trad_sl']: saved_by_buffer_count += 1
                         open_trades.remove(trade)
                 else: # SELL
                     if row['high'] >= trade['sl_inst']:
                         daily_pnl[day_str] -= risk_usd
-                        if trade['hit_trad_sl']:
-                            trad_sl_hit_count += 1
+                        if trade['hit_trad_sl']: trad_sl_hit_count += 1
                         open_trades.remove(trade)
                     elif row['low'] <= trade['tp']:
                         daily_pnl[day_str] += reward_usd
                         wins += 1
-                        if trade['hit_trad_sl']:
-                            saved_by_buffer_count += 1
+                        if trade['hit_trad_sl']: saved_by_buffer_count += 1
                         open_trades.remove(trade)
-                        
-            # Abrir nuevos trades si no hay trades activos (para simplificar)
-            if row['signal'] != 0 and len(open_trades) == 0:
-                # Verificar si el SL tradicional cruza o toca el buffer (cálculo de entrada)
-                sl_trad = row['close'] - base_sl_dist if row['signal'] == 1 else row['close'] + base_sl_dist
-                sl_inst = sl_trad - row['buffer'] if row['signal'] == 1 else sl_trad + row['buffer']
+
+            # Si ya operamos hoy en este activo o hay trades abiertos, no buscar más entradas
+            if trades_today >= 1 or len(open_trades) > 0:
+                continue
+
+            signal = 0
+            
+            # ---------------------------------------------------------
+            # 2. LÓGICA DE ESTRATEGIAS
+            # ---------------------------------------------------------
+            if symbol == 'EURUSD':
+                # SMC FVG (08:30 - 11:30)
+                is_fvg_window = (h == 8 and m >= 30) or (h > 8 and h < 11) or (h == 11 and m <= 30)
                 
-                # Para forzar TP a ratio 1:2 usamos la distancia técnica base
-                tp = row['close'] + (base_sl_dist * 2.0) if row['signal'] == 1 else row['close'] - (base_sl_dist * 2.0)
+                if is_fvg_window:
+                    # Detectar nuevos FVGs (Vela 1 = prev2, Vela 3 = row)
+                    # Bullish FVG: Max Vela 1 < Min Vela 3
+                    if prev2['high'] < row['low'] and prev1['close'] > prev1['open']:
+                        active_bull_fvg = {'top': row['low'], 'bottom': prev2['high']}
+                    
+                    # Bearish FVG: Min Vela 1 > Max Vela 3
+                    if prev2['low'] > row['high'] and prev1['close'] < prev1['open']:
+                        active_bear_fvg = {'top': prev2['low'], 'bottom': row['high']}
+                        
+                    # Evaluar Mitigación (Entrada) en vela actual
+                    if active_bull_fvg and row['low'] <= active_bull_fvg['top']:
+                        signal = 1
+                        active_bull_fvg = None # Invalida el gap tras usarlo
+                    elif active_bear_fvg and row['high'] >= active_bear_fvg['bottom']:
+                        signal = -1
+                        active_bear_fvg = None
+                else:
+                    # Fuera de sesión, limpiar FVGs
+                    active_bull_fvg = None
+                    active_bear_fvg = None
+
+            elif symbol == 'XAUUSD':
+                # NY ORB (Observación 15:30 - 16:00, Ejecución 16:00 - 17:00)
+                # Observación
+                if (h == 15 and m >= 30):
+                    if row['high'] > orb_high: orb_high = row['high']
+                    if row['low'] < orb_low: orb_low = row['low']
+                
+                # Ejecución
+                if h == 16:
+                    orb_active = True
+                    if row['close'] > orb_high:
+                        signal = 1
+                        orb_active = False # Evita múltiples disparos
+                    elif row['close'] < orb_low:
+                        signal = -1
+                        orb_active = False
+                else:
+                    orb_active = False
+            
+            # ---------------------------------------------------------
+            # 3. EJECUCIÓN DEL TRADE
+            # ---------------------------------------------------------
+            if signal != 0:
+                sl_trad = row['close'] - base_sl_dist if signal == 1 else row['close'] + base_sl_dist
+                sl_inst = sl_trad - row['buffer'] if signal == 1 else sl_trad + row['buffer']
+                tp = row['close'] + (base_sl_dist * 2.0) if signal == 1 else row['close'] - (base_sl_dist * 2.0)
                 
                 open_trades.append({
-                    'type': 'BUY' if row['signal'] == 1 else 'SELL',
+                    'type': 'BUY' if signal == 1 else 'SELL',
                     'entry': row['close'],
                     'sl_trad': sl_trad,
                     'sl_inst': sl_inst,
@@ -163,6 +214,7 @@ def run_simulation():
                     'hit_trad_sl': False
                 })
                 total_trades += 1
+                trades_today += 1
                 
         # Final calculations
         net_pnl = sum(daily_pnl.values())
@@ -171,6 +223,7 @@ def run_simulation():
         
         final_report.append({
             'symbol': symbol,
+            'strategy': 'SMC FVG' if symbol == 'EURUSD' else 'NY ORB',
             'trades': total_trades,
             'win_rate': win_rate,
             'net_pnl': net_pnl,
@@ -180,13 +233,13 @@ def run_simulation():
         })
         
     print("\n" + "="*50)
-    print("📊 REPORTE FINAL DEL SIMULADOR")
+    print("📊 REPORTE FINAL DEL SIMULADOR ESTRATÉGICO")
     print("="*50)
     
     total_net = 0.0
     for res in final_report:
         total_net += res['net_pnl']
-        print(f"\nActivo: {res['symbol']}")
+        print(f"\nEstrategia: {res['strategy']} ({res['symbol']})")
         print(f"  - Operaciones: {res['trades']}")
         print(f"  - Win Rate:    {res['win_rate']:.2f}%")
         print(f"  - PnL Neto:    ${res['net_pnl']:.2f}")

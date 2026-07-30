@@ -28,16 +28,20 @@ class NY_ORB_Strategy(BaseStrategy):
         # Filtro de tiempo para el rango
         time_mask = (df['time'].dt.time >= start_time) & (df['time'].dt.time <= end_time)
         
-        # 2. Cálculo Vectorial del Rango Máximo y Mínimo por Día
+        # 2. Cálculo Vectorial del Rango Máximo y Mínimo por Día (Estrictamente Causal)
         df['date'] = df['time'].dt.date
         
-        # Agrupamos solo los datos dentro del rango horario
-        range_highs = df[time_mask].groupby('date')['high'].max()
-        range_lows = df[time_mask].groupby('date')['low'].min()
+        # Guardamos el high/low solo si estamos dentro de la ventana de observación
+        df['range_high_accum'] = np.where(time_mask, df['high'], np.nan)
+        df['range_low_accum'] = np.where(time_mask, df['low'], np.nan)
         
-        # Mapeamos los rangos de vuelta al dataframe original
-        df['range_high'] = df['date'].map(range_highs)
-        df['range_low'] = df['date'].map(range_lows)
+        # Usamos cummax/cummin por día para acumular el máximo/mínimo hasta la vela actual (0 Look-Ahead)
+        df['range_high'] = df.groupby('date')['range_high_accum'].cummax()
+        df['range_low'] = df.groupby('date')['range_low_accum'].cummin()
+        
+        # Propagamos el último valor conocido hacia adelante para usarlo después de las 08:15
+        df['range_high'] = df['range_high'].ffill()
+        df['range_low'] = df['range_low'].ffill()
         
         # 3. Cálculo de la SMA del Volumen
         # En MT5 se usa 'tick_volume'

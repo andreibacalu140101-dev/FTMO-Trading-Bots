@@ -168,6 +168,8 @@ def main():
     for symbol in symbols_to_trade:
         mt5.symbol_select(symbol, True)
         
+    last_trade_time = {} # Diccionario Anti-Spam de señales
+        
     # Bucle Principal de Alta Frecuencia Segura
     try:
         while True:
@@ -205,10 +207,16 @@ def main():
                                 
                     # PASO 4: Ejecución de Órdenes
                     if best_signal is not None:
+                        # Mecanismo Anti-Spam: Prevenir disparar 100 veces en la misma vela si la orden falla o ya se abrió
+                        signal_time = df.iloc[-1]['time']
+                        if symbol in last_trade_time and last_trade_time[symbol] == signal_time:
+                            continue # Ya intentamos disparar en esta misma vela, ignorar hasta la siguiente
+                            
                         # Preguntar al Gestor de Riesgo si la matriz de exposición y el filtro de horario permiten el trade
                         if risk_manager.can_open_trade(symbol, best_signal):
                             log(f"🎯 Señal detectada: {best_signal['signal_type']} en {symbol} vía {best_signal['strategy_name']} (R:R {best_signal.get('rr_ratio',0):.2f})")
                             execute_trade(symbol, best_signal)
+                            last_trade_time[symbol] = signal_time # Registrar disparo para no repetir en esta vela
                             
             except Exception as e:
                 # Catch-all para que el bot nunca crashee por excepciones en tiempo de ejecución

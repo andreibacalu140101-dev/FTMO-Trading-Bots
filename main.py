@@ -70,13 +70,19 @@ def fetch_rates_with_retry(symbol, timeframe, count, max_retries=3):
     return None
 
 def calculate_volume(symbol, sl_price, entry_price):
-    """Calcula el lotaje basado en el riesgo fijo en USD configurado."""
+    """Calcula el lotaje dinámico basado en el porcentaje de riesgo del balance."""
     symbol_info = mt5.symbol_info(symbol)
     if symbol_info is None:
         return 0.01 # Fallback
         
-    # Cálculo básico (aproximado si la cuenta es USD y la cotizada es USD)
-    risk_usd = getattr(config, 'RISK_PER_TRADE_USD', 50.0)
+    account_info = mt5.account_info()
+    if account_info is None:
+        return 0.01
+        
+    # Cálculo dinámico basado en el balance actual de la cuenta
+    risk_percent = getattr(config, 'RISK_PER_TRADE_PERCENT', 0.5)
+    risk_usd = account_info.balance * (risk_percent / 100.0)
+    
     risk_dist = abs(entry_price - sl_price)
     
     if risk_dist == 0:

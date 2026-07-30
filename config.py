@@ -27,6 +27,9 @@ SYMBOLS: List[str] = [
     "US30"
 ]
 
+# Timeframe por defecto a evaluar
+TIMEFRAME = mt5.TIMEFRAME_M15
+
 # Temporizador del main loop (en segundos)
 TICK_SLEEP: float = 1.0
 

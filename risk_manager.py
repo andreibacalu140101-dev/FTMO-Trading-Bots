@@ -124,16 +124,29 @@ class FTMORiskManager:
                 
         return self.trading_allowed
 
-    def can_open_trade(self, symbol) -> bool:
+    def can_open_trade(self, symbol, signal_dict) -> bool:
         """
         Verifica el horario operativo, el Kill Switch y la matriz de correlación antes de autorizar un trade.
         """
-        # 1. Filtro Global de Horario Operativo (CET/CEST)
+        # 1. Filtro Global de Horario Operativo (CET/CEST) con Excepciones de Alta Calidad
         current_hour = self._get_cet_time().hour
         if hasattr(config, 'TRADING_START_HOUR') and hasattr(config, 'TRADING_END_HOUR'):
-            if not (config.TRADING_START_HOUR <= current_hour < config.TRADING_END_HOUR):
-                print(f"⏳ Fuera de horario operativo ({config.TRADING_START_HOUR}:00-{config.TRADING_END_HOUR}:00 CET). Trade denegado en {symbol}.")
-                return False
+            in_session = (config.TRADING_START_HOUR <= current_hour < config.TRADING_END_HOUR)
+            
+            if not in_session:
+                # 🌟 Excepciones Seguras Fuera de Horario
+                strategy_name = signal_dict.get('strategy_name', '')
+                rr_ratio = signal_dict.get('rr_ratio', 0)
+                
+                # Criterio de QA Quant: Solo permitir NightScalper o trades con R:R >= 2.0
+                is_night_scalper = (strategy_name == "NightScalper")
+                is_high_probability = (rr_ratio >= 2.0)
+                
+                if not (is_night_scalper or is_high_probability):
+                    print(f"⏳ Fuera de horario ({config.TRADING_START_HOUR}:00-{config.TRADING_END_HOUR}:00 CET). Trade denegado en {symbol} ({strategy_name} R:R={rr_ratio:.2f}).")
+                    return False
+                else:
+                    print(f"🌟 Excepción Nocturna Aprobada en {symbol}: Estrategia {strategy_name} (R:R={rr_ratio:.2f}) superó el filtro cuantitativo.")
 
         # 2. Si el Kill Switch está activo, se rechaza cualquier trade
         if not self.trading_allowed:

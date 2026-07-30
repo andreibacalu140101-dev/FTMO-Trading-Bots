@@ -205,8 +205,8 @@ def main():
                                 
                     # PASO 4: Ejecución de Órdenes
                     if best_signal is not None:
-                        # Preguntar al Gestor de Riesgo si la matriz de exposición permite el trade
-                        if risk_manager.can_open_trade(symbol):
+                        # Preguntar al Gestor de Riesgo si la matriz de exposición y el filtro de horario permiten el trade
+                        if risk_manager.can_open_trade(symbol, best_signal):
                             log(f"🎯 Señal detectada: {best_signal['signal_type']} en {symbol} vía {best_signal['strategy_name']} (R:R {best_signal.get('rr_ratio',0):.2f})")
                             execute_trade(symbol, best_signal)
                             

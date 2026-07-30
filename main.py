@@ -239,6 +239,23 @@ def main():
                             
                         # Preguntar al Gestor de Riesgo si la matriz de exposición y el filtro de horario permiten el trade
                         if risk_manager.can_open_trade(symbol, best_signal):
+                            # ==========================================
+                            # 🛡️ BUFFER INSTITUCIONAL DE STOP LOSS
+                            # ==========================================
+                            symbol_info_local = mt5.symbol_info(symbol)
+                            tick_local = mt5.symbol_info_tick(symbol)
+                            if symbol_info_local and tick_local:
+                                p_size = 10 * symbol_info_local.point if (symbol_info_local.digits == 5 or symbol_info_local.digits == 3) else symbol_info_local.point
+                                
+                                spread_buffer = tick_local.ask - tick_local.bid
+                                atr_buffer = (atr_14 * p_size) * 0.5
+                                total_buffer = spread_buffer + atr_buffer
+                                
+                                if best_signal['signal_type'] == "BUY":
+                                    best_signal['sl'] -= total_buffer
+                                else:
+                                    best_signal['sl'] += total_buffer
+                                    
                             log(f"🎯 Señal detectada: {best_signal['signal_type']} en {symbol} vía {best_signal['strategy_name']} (R:R {best_signal.get('rr_ratio',0):.2f})")
                             execute_trade(symbol, best_signal)
                             last_trade_time[symbol] = signal_time # Registrar disparo para no repetir en esta vela

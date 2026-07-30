@@ -34,6 +34,10 @@ class BaseStrategy(ABC):
         # Ejecutar la lógica vectorial completa
         df = self.generate_signals(df.copy())
         
+        # Cortocircuito si la estrategia devuelve None (Ej: fuera de su horario descentralizado)
+        if df is None:
+            return None
+            
         # Extraer la fila de la última vela cerrada (-2) para Anti-Repaint
         closed_candle = df.iloc[-2]
         

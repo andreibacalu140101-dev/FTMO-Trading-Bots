@@ -1,5 +1,7 @@
 import pandas as pd
 import numpy as np
+import pytz
+from datetime import datetime, time
 from . import BaseStrategy
 
 class NY_ORB_Strategy(BaseStrategy):
@@ -12,6 +14,13 @@ class NY_ORB_Strategy(BaseStrategy):
         self.vol_sma_period = vol_sma_period
 
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        # Filtro de Sesión Descentralizado (14:30 a 16:30 CET)
+        tz = pytz.timezone('Europe/Prague')
+        current_time = datetime.now(tz).time()
+        
+        if not (time(14, 30) <= current_time <= time(16, 30)):
+            return None
+            
         # Aseguramos formato datetime
         if not pd.api.types.is_datetime64_any_dtype(df['time']):
             df['time'] = pd.to_datetime(df['time'])

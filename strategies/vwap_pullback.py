@@ -1,5 +1,7 @@
 import pandas as pd
 import numpy as np
+import pytz
+from datetime import datetime, time
 from . import BaseStrategy
 
 class VWAP_Pullback_Strategy(BaseStrategy):
@@ -14,8 +16,14 @@ class VWAP_Pullback_Strategy(BaseStrategy):
         self.stoch_slowing = stoch_slowing
         self.start_hour = start_hour
         self.end_hour = end_hour
+        self.timezone = pytz.timezone('Europe/Prague')
 
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        # Filtro de Sesión Descentralizado (09:00 a 17:00 CET)
+        current_time = datetime.now(self.timezone).time()
+        if not (time(9, 0) <= current_time <= time(17, 0)):
+            return None
+            
         df['signal'] = 0
         if len(df) < self.stoch_k + self.stoch_d + self.stoch_slowing:
             return df

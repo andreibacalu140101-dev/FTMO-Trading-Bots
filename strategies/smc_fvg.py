@@ -1,5 +1,7 @@
 import pandas as pd
 import numpy as np
+import pytz
+from datetime import datetime, time
 from . import BaseStrategy
 
 class SMC_FVG_Strategy(BaseStrategy):
@@ -7,12 +9,17 @@ class SMC_FVG_Strategy(BaseStrategy):
     Estrategia SMC FVG (Fair Value Gap) - M15
     Vectorización de Máquina de Estados para Gaps no mitigados.
     """
-    def __init__(self, start_hour=8, end_hour=17, name="SMC_FVG"):
+    def __init__(self, name="SMC_FVG"):
         super().__init__(name=name)
-        self.start_hour = start_hour
-        self.end_hour = end_hour
 
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        # Filtro de Sesión Descentralizado (08:30 a 11:30 CET)
+        tz = pytz.timezone('Europe/Prague')
+        current_time = datetime.now(tz).time()
+        
+        if not (time(8, 30) <= current_time <= time(11, 30)):
+            return None
+            
         df['signal'] = 0
         if len(df) < 3:
             return df
@@ -70,13 +77,9 @@ class SMC_FVG_Strategy(BaseStrategy):
         # Usamos shift(1) para saber si AL EMPEZAR LA VELA ACTUAL el gap ya estaba consumido
         df['already_consumed'] = df.groupby('fvg_id')['consumed_event'].cumsum().shift(1).fillna(0) > 0
         
-        # 7. Filtro Horario
-        df['hour'] = df['time'].dt.hour
-        in_session = (df['hour'] >= self.start_hour) & (df['hour'] < self.end_hour)
-        
-        # 8. Señal Final
-        df['valid_buy_trigger'] = bull_mitigation & ~df['already_consumed'] & in_session
-        df['valid_sell_trigger'] = bear_mitigation & ~df['already_consumed'] & in_session
+        # 7. Señal Final
+        df['valid_buy_trigger'] = bull_mitigation & ~df['already_consumed']
+        df['valid_sell_trigger'] = bear_mitigation & ~df['already_consumed']
         
         df.loc[df['valid_buy_trigger'], 'signal'] = 1
         df.loc[df['valid_sell_trigger'], 'signal'] = -1

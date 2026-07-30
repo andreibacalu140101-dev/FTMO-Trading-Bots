@@ -126,27 +126,9 @@ class FTMORiskManager:
 
     def can_open_trade(self, symbol, signal_dict) -> bool:
         """
-        Verifica el horario operativo, el Kill Switch y la matriz de correlación antes de autorizar un trade.
+        Verifica el Kill Switch y la matriz de correlación antes de autorizar un trade.
         """
-        # 1. Filtro Global de Horario Operativo (CET/CEST) con Excepciones de Alta Calidad
-        current_hour = self._get_cet_time().hour
-        if hasattr(config, 'TRADING_START_HOUR') and hasattr(config, 'TRADING_END_HOUR'):
-            in_session = (config.TRADING_START_HOUR <= current_hour < config.TRADING_END_HOUR)
-            
-            if not in_session:
-                # 🌟 Excepciones Seguras Fuera de Horario
-                strategy_name = signal_dict.get('strategy_name', '')
-                
-                # Criterio Institucional: Solo permitir NightScalper fuera de horario.
-                is_night_scalper = (strategy_name == "NightScalper" or strategy_name == "Night_Scalper")
-                
-                if not is_night_scalper:
-                    print(f"⏳ Fuera de sesión ({config.TRADING_START_HOUR}:00-{config.TRADING_END_HOUR}:00). Trade {strategy_name} bloqueado en {symbol}.")
-                    return False
-                else:
-                    print(f"🌟 Excepción Nocturna Autorizada en {symbol}: {strategy_name} diseñada para baja volatilidad.")
-
-        # 2. Si el Kill Switch está activo, se rechaza cualquier trade
+        # 1. Si el Kill Switch está activo, se rechaza cualquier trade
         if not self.trading_allowed:
             return False
             

@@ -1,5 +1,7 @@
 import pandas as pd
 import numpy as np
+import pytz
+from datetime import datetime, time
 from . import BaseStrategy
 
 class NightScalperStrategy(BaseStrategy):
@@ -15,6 +17,14 @@ class NightScalperStrategy(BaseStrategy):
         self.fixed_sl_pips = fixed_sl_pips
 
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        # Filtro de Sesión Descentralizado (23:00 a 02:00 CET)
+        tz = pytz.timezone('Europe/Prague')
+        current_time = datetime.now(tz).time()
+        
+        # Como cruza la medianoche, la lógica de ventana es diferente
+        if not (current_time >= time(23, 0) or current_time <= time(2, 0)):
+            return None
+            
         if len(df) < max(self.bb_period, self.rsi_period):
             df['signal'] = 0
             return df

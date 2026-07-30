@@ -1,38 +1,56 @@
 import MetaTrader5 as mt5
-import time
 import pandas as pd
+import time
 from datetime import datetime
 import pytz
-from risk_manager import FTMORiskManager
+import traceback
+
 import config
+from risk_manager import FTMORiskManager
+
+# Importar las 7 estrategias
+from strategies import (
+    HiddenDivergenceStrategy,
+    NY_ORB_Strategy,
+    NightScalperStrategy,
+    SMC_FVG_Strategy,
+    TrendMomentumStrategy,
+    VWAP_Pullback_Strategy,
+    VolatilityBreakoutStrategy
+)
+
+def log(msg):
+    """Función de logging con timestamp para consola."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{now}] {msg}")
 
 def initialize_mt5():
-    """Inicializa la conexión segura con la terminal MetaTrader 5."""
-    print("Iniciando conexión con MetaTrader 5...")
+    """Conecta a la terminal MetaTrader 5."""
+    log("Iniciando conexión con MetaTrader 5...")
     
-    if config.MT5_ACCOUNT != 0 and config.MT5_PASSWORD != "":
+    if hasattr(config, 'MT5_ACCOUNT') and config.MT5_ACCOUNT != 0 and config.MT5_PASSWORD != "":
         authorized = mt5.initialize(login=config.MT5_ACCOUNT, server=config.MT5_SERVER, password=config.MT5_PASSWORD)
     else:
         authorized = mt5.initialize()
         
     if not authorized:
-        print(f"❌ Fallo al inicializar MT5, error code = {mt5.last_error()}")
+        log(f"❌ Error CRÍTICO: No se pudo conectar a MT5. Código: {mt5.last_error()}")
         return False
         
     terminal_info = mt5.terminal_info()
     if terminal_info is None:
-        print("❌ No se pudo obtener información de la terminal.")
+        log("❌ Error CRÍTICO: No se obtuvo info de la terminal.")
         return False
         
     if not terminal_info.trade_allowed:
-        print("❌ AutoTrading está DESACTIVADO en la terminal MT5. Actívalo para continuar.")
+        log("❌ AutoTrading está DESACTIVADO en la terminal MT5.")
         return False
         
-    print(f"✅ Conexión establecida. Terminal Build: {terminal_info.build}")
+    log(f"✅ Conectado exitosamente. Terminal Build: {terminal_info.build}")
     return True
 
 def fetch_rates_with_retry(symbol, timeframe, count, max_retries=3):
-    """Watchdog: Obtiene velas con backoff exponencial si hay fallo de conexión."""
+    """Descarga de velas segura con backoff en caso de fallos."""
     for attempt in range(max_retries):
         rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
         if rates is not None and len(rates) > 0:
@@ -40,98 +58,166 @@ def fetch_rates_with_retry(symbol, timeframe, count, max_retries=3):
             df['time'] = pd.to_datetime(df['time'], unit='s')
             return df
         
-        # Fallo en la obtención, posible pérdida de conexión
-        wait_time = 2 ** attempt  # 1s, 2s, 4s...
-        print(f"⚠️ Error obteniendo datos para {symbol}. Reintentando en {wait_time}s... (Intento {attempt+1}/{max_retries})")
+        wait_time = 2 ** attempt
+        log(f"⚠️ Aviso: Fallo obteniendo velas de {symbol}. Reintentando en {wait_time}s...")
         time.sleep(wait_time)
         
-        # Intentar reconectar si la conexión se cayó
+        # Reconexión de emergencia
         if mt5.terminal_info() is None:
-            print("🔄 Intento de reconexión a MT5...")
+            log("🔄 Terminal desconectada. Intentando reconectar...")
             initialize_mt5()
             
     return None
 
-def is_within_trading_hours():
-    """Verifica si la hora actual del broker está dentro de TRADING_HOURS."""
-    tz = pytz.timezone(config.BROKER_TIMEZONE)
-    now = datetime.now(tz)
+def calculate_volume(symbol, sl_price, entry_price):
+    """Calcula el lotaje basado en el riesgo fijo en USD configurado."""
+    symbol_info = mt5.symbol_info(symbol)
+    if symbol_info is None:
+        return 0.01 # Fallback
+        
+    # Cálculo básico (aproximado si la cuenta es USD y la cotizada es USD)
+    risk_usd = getattr(config, 'RISK_PER_TRADE_USD', 50.0)
+    risk_dist = abs(entry_price - sl_price)
     
-    start_time = datetime.strptime(config.TRADING_HOURS["start"], "%H:%M").time()
-    end_time = datetime.strptime(config.TRADING_HOURS["end"], "%H:%M").time()
+    if risk_dist == 0:
+        return symbol_info.volume_min
+        
+    tick_value = symbol_info.trade_tick_value
+    tick_size = symbol_info.trade_tick_size
     
-    current_time = now.time()
-    return start_time <= current_time <= end_time
+    # Pérdida de 1 lote = (risk_dist / tick_size) * tick_value
+    if tick_size == 0 or tick_value == 0:
+        return symbol_info.volume_min
+        
+    loss_for_one_lot = (risk_dist / tick_size) * tick_value
+    if loss_for_one_lot == 0:
+        return symbol_info.volume_min
+        
+    volume = risk_usd / loss_for_one_lot
+    
+    # Normalizar volumen
+    step = symbol_info.volume_step
+    volume = round(volume / step) * step
+    volume = max(symbol_info.volume_min, min(volume, symbol_info.volume_max))
+    
+    return volume
+
+def execute_trade(symbol, signal_dict):
+    """Ejecuta la orden en MT5 a mercado usando los datos de la señal."""
+    order_type = mt5.ORDER_TYPE_BUY if signal_dict['signal_type'] == "BUY" else mt5.ORDER_TYPE_SELL
+    
+    tick = mt5.symbol_info_tick(symbol)
+    if tick is None:
+        log(f"❌ Error al obtener precio actual para {symbol}")
+        return
+        
+    price = tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid
+    volume = calculate_volume(symbol, signal_dict['sl'], price)
+    
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": symbol,
+        "volume": volume,
+        "type": order_type,
+        "price": price,
+        "sl": signal_dict['sl'],
+        "tp": signal_dict['tp'],
+        "deviation": 20,
+        "magic": getattr(config, 'MAGIC_NUMBER', 777000),
+        "comment": signal_dict['strategy_name'][:15],
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_IOC,
+    }
+    
+    result = mt5.order_send(request)
+    if result.retcode != mt5.TRADE_RETCODE_DONE:
+        log(f"❌ Rechazo de orden {symbol} ({signal_dict['strategy_name']}): {result.comment}")
+    else:
+        log(f"🚀 ¡Orden EXITOSA! {signal_dict['signal_type']} en {symbol}. Vol: {volume}, Ticket: {result.order}")
 
 def main():
     if not initialize_mt5():
-        mt5.shutdown()
         return
 
-    print("🤖 Bot Algorítmico Cuantitativo Iniciado.")
+    log("🤖 Orquestador Principal (Cerebro) Iniciado. Cuenta fondeo FTMO $10,000.")
+    
+    # Instanciar Gestor de Riesgos
     risk_manager = FTMORiskManager()
     
-    # strategies = [ Strategy1(), Strategy2() ] # Instanciar aquí las clases de estrategias
-    strategies = [] 
+    # Instanciar el arsenal de 7 estrategias
+    strategies = {
+        "HiddenDivergence": HiddenDivergenceStrategy(),
+        "NY_ORB": NY_ORB_Strategy(),
+        "NightScalper": NightScalperStrategy(),
+        "SMC_FVG": SMC_FVG_Strategy(),
+        "TrendMomentum": TrendMomentumStrategy(),
+        "VWAP_Pullback": VWAP_Pullback_Strategy(),
+        "VolatilityBreakout": VolatilityBreakoutStrategy()
+    }
     
-    # Inicializar símbolos en MT5
-    for symbol in config.SYMBOLS:
+    log(f"🧠 {len(strategies)} Estrategias cargadas y listas.")
+    
+    # Activar símbolos en Market Watch
+    symbols_to_trade = getattr(config, 'SYMBOLS', ["EURUSD"])
+    for symbol in symbols_to_trade:
         mt5.symbol_select(symbol, True)
-
+        
+    # Bucle Principal de Alta Frecuencia Segura
     try:
         while True:
-            # 1. Verificar Límites de Riesgo Diarios y Gestionar Break Evens
-            is_blocked = risk_manager.update()
-            risk_manager.manage_breakeven()
-            
-            # Si estamos fuera de horario, no evaluamos nuevas entradas
-            if not is_blocked and is_within_trading_hours():
+            try:
+                # PASO 1: Riesgo Global (Kill Switch)
+                trading_allowed = risk_manager.update()
+                if not trading_allowed:
+                    # El Kill Switch se activó por superar la pérdida límite de -$380.
+                    # Saltamos el ciclo (no evaluamos estrategias).
+                    time.sleep(10)
+                    continue
+                    
+                # PASO 2: Protección Flotante
+                risk_manager.manage_breakeven()
                 
-                # Bucle Symbol-First
-                for symbol in config.SYMBOLS:
-                    # 2. Filtro de Spread en Vivo
-                    tick = mt5.symbol_info_tick(symbol)
-                    symbol_info = mt5.symbol_info(symbol)
-                    
-                    if tick is None or symbol_info is None:
-                        continue
-                        
-                    pip_size = 10 * symbol_info.point if (symbol_info.digits == 5 or symbol_info.digits == 3) else symbol_info.point
-                    current_spread_pips = (tick.ask - tick.bid) / pip_size
-                    
-                    if current_spread_pips > config.MAX_SPREAD_PIPS:
-                        continue # Descartar símbolo temporalmente por alto spread
-                        
-                    # 3. Watchdog: Obtener velas
-                    df = fetch_rates_with_retry(symbol, config.TIMEFRAME, count=50)
+                # PASO 3: Evaluación Símbolo a Símbolo
+                for symbol in symbols_to_trade:
+                    # Obtener 100 velas (Suficiente para EMAs grandes como la de 200 en H1)
+                    # Usamos M15 por defecto, aunque cada estrategia podría requerir su propio timeframe
+                    # Aquí estandarizamos a la obtención de velas solicitada.
+                    df = fetch_rates_with_retry(symbol, getattr(config, 'TIMEFRAME', mt5.TIMEFRAME_M15), 300)
                     if df is None:
                         continue
                         
-                    # 4. Evaluar Estrategias
                     best_signal = None
-                    for strategy in strategies:
-                        # expected signature: strategy.evaluate(df, symbol)
+                    
+                    for name, strategy in strategies.items():
+                        # Usamos evaluate() que procesa generate_signals(df) internamente y aplica Anti-Repaint
                         signal = strategy.evaluate(df, symbol)
+                        
                         if signal is not None:
-                            # Comparar R:R para quedarnos con la mejor señal si hay varias
+                            # Filtro: Nos quedamos con la señal que ofrezca mejor R:R
                             if best_signal is None or signal.get('rr_ratio', 0) > best_signal.get('rr_ratio', 0):
                                 best_signal = signal
                                 
-                    # 5. Control de Correlación y Ejecución
+                    # PASO 4: Ejecución de Órdenes
                     if best_signal is not None:
+                        # Preguntar al Gestor de Riesgo si la matriz de exposición permite el trade
                         if risk_manager.can_open_trade(symbol):
-                            # Aquí iría el código de order_send utilizando best_signal
-                            # print(f"🚀 Ejecutando {best_signal['signal_type']} en {symbol}")
-                            pass
-            
-            # Pausa para no consumir 100% CPU
-            time.sleep(config.TICK_SLEEP)
+                            log(f"🎯 Señal detectada: {best_signal['signal_type']} en {symbol} vía {best_signal['strategy_name']} (R:R {best_signal.get('rr_ratio',0):.2f})")
+                            execute_trade(symbol, best_signal)
+                            
+            except Exception as e:
+                # Catch-all para que el bot nunca crashee por excepciones en tiempo de ejecución
+                log(f"🔥 Error en el Bucle Principal: {str(e)}")
+                log(traceback.format_exc())
+                time.sleep(5) # Pausa por si es un error repetitivo
+                
+            # Sleep final del ciclo para descargar la CPU (Heartbeat)
+            time.sleep(getattr(config, 'TICK_SLEEP', 1.0))
             
     except KeyboardInterrupt:
-        print("\n⏹️ Deteniendo bot por interrupción manual (Ctrl+C).")
+        log("⏹️ Deteniendo bot por interrupción manual de usuario (Ctrl+C).")
     finally:
         mt5.shutdown()
-        print("🔌 Conexión con MT5 cerrada de forma segura.")
+        log("🔌 Conexión con MT5 finalizada de forma segura.")
 
 if __name__ == "__main__":
     main()

@@ -24,7 +24,7 @@ SYMBOLS: List[str] = [
     "GBPUSD",
     "USDJPY",
     "XAUUSD",
-    "US30"
+    "US30.cash"
 ]
 
 # Timeframe por defecto a evaluar

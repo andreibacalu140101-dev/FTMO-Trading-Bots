@@ -4,7 +4,7 @@ import numpy as np
 import pytz
 from datetime import datetime, timedelta
 
-def get_data(symbol, timeframe, days=7):
+def get_data(symbol, timeframe, days=30):
     tz = pytz.timezone('Europe/Prague')
     utc_to = datetime.now(pytz.timezone('UTC'))
     utc_from = utc_to - timedelta(days=days)
@@ -37,12 +37,12 @@ def run_simulation():
     final_report = []
     
     print("="*50)
-    print("🧪 INICIANDO BACKTEST SIMULATOR INSTITUCIONAL (7 Días)")
+    print("🧪 INICIANDO BACKTEST SIMULATOR INSTITUCIONAL (30 Días)")
     print("="*50)
     
     for symbol in symbols:
         print(f"\nProcesando {symbol}...")
-        df = get_data(symbol, mt5.TIMEFRAME_M5, 7)
+        df = get_data(symbol, mt5.TIMEFRAME_M5, 30)
         if df is None:
             continue
             
@@ -63,10 +63,15 @@ def run_simulation():
         # Variables de Simulación
         open_trades = []
         daily_pnl = {}
+        kill_switch_days = set()
+        
         total_trades = 0
         wins = 0
         saved_by_buffer_count = 0
         trad_sl_hit_count = 0
+        
+        consecutive_losses = 0
+        max_consecutive_losses = 0
         
         risk_usd = 50.0 # 0.5% de $10,000
         reward_usd = 100.0 # Ratio 1:2
@@ -110,6 +115,7 @@ def run_simulation():
                 
             # Restricción FTMO (Kill Switch)
             if daily_pnl[day_str] <= -380.0:
+                kill_switch_days.add(day_str)
                 continue
                 
             # ---------------------------------------------------------
@@ -126,20 +132,32 @@ def run_simulation():
                     if row['low'] <= trade['sl_inst']:
                         daily_pnl[day_str] -= risk_usd
                         if trade['hit_trad_sl']: trad_sl_hit_count += 1
+                        
+                        consecutive_losses += 1
+                        if consecutive_losses > max_consecutive_losses:
+                            max_consecutive_losses = consecutive_losses
+                            
                         open_trades.remove(trade)
                     elif row['high'] >= trade['tp']:
                         daily_pnl[day_str] += reward_usd
                         wins += 1
+                        consecutive_losses = 0
                         if trade['hit_trad_sl']: saved_by_buffer_count += 1
                         open_trades.remove(trade)
                 else: # SELL
                     if row['high'] >= trade['sl_inst']:
                         daily_pnl[day_str] -= risk_usd
                         if trade['hit_trad_sl']: trad_sl_hit_count += 1
+                        
+                        consecutive_losses += 1
+                        if consecutive_losses > max_consecutive_losses:
+                            max_consecutive_losses = consecutive_losses
+                            
                         open_trades.remove(trade)
                     elif row['low'] <= trade['tp']:
                         daily_pnl[day_str] += reward_usd
                         wins += 1
+                        consecutive_losses = 0
                         if trade['hit_trad_sl']: saved_by_buffer_count += 1
                         open_trades.remove(trade)
 
@@ -220,33 +238,40 @@ def run_simulation():
         net_pnl = sum(daily_pnl.values())
         max_dd = min(daily_pnl.values()) if daily_pnl else 0.0
         win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
+        total_operable_days = len(daily_pnl)
         
         final_report.append({
             'symbol': symbol,
             'strategy': 'SMC FVG' if symbol == 'EURUSD' else 'NY ORB',
             'trades': total_trades,
+            'operable_days': total_operable_days,
             'win_rate': win_rate,
             'net_pnl': net_pnl,
             'max_dd': max_dd,
+            'max_losing_streak': max_consecutive_losses,
+            'kill_switch_hits': len(kill_switch_days),
             'saved_by_buffer': saved_by_buffer_count,
             'hit_sl': trad_sl_hit_count
         })
         
     print("\n" + "="*50)
-    print("📊 REPORTE FINAL DEL SIMULADOR ESTRATÉGICO")
+    print("📊 REPORTE FINAL DEL SIMULADOR ESTRATÉGICO (30 DÍAS)")
     print("="*50)
     
     total_net = 0.0
     for res in final_report:
         total_net += res['net_pnl']
         print(f"\nEstrategia: {res['strategy']} ({res['symbol']})")
+        print(f"  - Días Operables: {res['operable_days']}")
         print(f"  - Operaciones: {res['trades']}")
         print(f"  - Win Rate:    {res['win_rate']:.2f}%")
         print(f"  - PnL Neto:    ${res['net_pnl']:.2f}")
         print(f"  - Max DD Día:  ${res['max_dd']:.2f}")
+        print(f"  - Peor Racha Perdedora: {res['max_losing_streak']} trades seguidos")
+        print(f"  - Veces Kill Switch Activado (-$380): {res['kill_switch_hits']} veces ⛔")
         print(f"  - Trades Salvados por Buffer: {res['saved_by_buffer']} 🛡️")
         
-    print(f"\n💰 PnL Total Consolidado: ${total_net:.2f}")
+    print(f"\n💰 PnL Total Consolidado (30 Días): ${total_net:.2f}")
     print("="*50)
 
     mt5.shutdown()

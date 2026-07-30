@@ -5,18 +5,45 @@ import pytz
 import config
 
 class FTMORiskManager:
+    """
+    Gestor de Riesgo Institucional para pruebas FTMO ($10,000).
+    Implementa el Kill Switch diario estricto y gestión de exposición.
+    """
     def __init__(self):
         self.initial_balance = 0.0
         self.last_reset_day = -1
-        self.trading_stopped_today = False
-        self.tz = pytz.timezone(config.BROKER_TIMEZONE)
+        self.trading_allowed = True
+        
+        # FTMO opera en horario CET/CEST (Praga/Berlín)
+        self.tz = pytz.timezone('Europe/Prague')
+        
+        # Límite de Pérdida Diaria FTMO ($400 max, fijamos Hard Limit en $380)
+        self.hard_stop_limit = 380.0 
         
     def _get_cet_time(self):
-        """Retorna la hora actual en la zona horaria CET (Broker FTMO)."""
+        """Retorna la hora actual del servidor en CET/CEST."""
         return datetime.now(self.tz)
 
+    def _cancel_pending_orders(self):
+        """Cancela todas las órdenes pendientes (Limit/Stop)."""
+        orders = mt5.orders_get()
+        if orders is None or len(orders) == 0:
+            return
+            
+        for order in orders:
+            request = {
+                "action": mt5.TRADE_ACTION_REMOVE,
+                "order": order.ticket,
+                "magic": config.MAGIC_NUMBER if hasattr(config, 'MAGIC_NUMBER') else 0
+            }
+            result = mt5.order_send(request)
+            if result.retcode != mt5.TRADE_RETCODE_DONE:
+                print(f"❌ Error al cancelar orden pendiente {order.ticket}: {result.comment}")
+            else:
+                print(f"✅ Orden pendiente {order.ticket} cancelada (Kill Switch).")
+
     def _close_all_positions(self):
-        """Cierra todas las posiciones abiertas nativamente (Panic Button)."""
+        """Cierra todas las posiciones abiertas a precio de mercado."""
         positions = mt5.positions_get()
         if positions is None or len(positions) == 0:
             return
@@ -46,9 +73,9 @@ class FTMORiskManager:
                 "type": close_type,
                 "position": pos.ticket,
                 "price": price_dict[close_type],
-                "deviation": 20,
-                "magic": config.MAGIC_NUMBER,
-                "comment": "Panic Close",
+                "deviation": 20, # Slippage permitido
+                "magic": config.MAGIC_NUMBER if hasattr(config, 'MAGIC_NUMBER') else 0,
+                "comment": "FTMO Kill Switch",
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": mt5.ORDER_FILLING_IOC,
             }
@@ -57,46 +84,68 @@ class FTMORiskManager:
             if result.retcode != mt5.TRADE_RETCODE_DONE:
                 print(f"❌ Error al cerrar posición {pos.ticket}: {result.comment}")
             else:
-                print(f"✅ Posición {pos.ticket} cerrada por riesgo diario.")
+                print(f"🚨 Posición {pos.ticket} cerrada a mercado (Kill Switch).")
 
-    def update(self):
-        """Verifica límites de riesgo diario. Devuelve True si la operativa está bloqueada."""
+    def execute_kill_switch(self, current_pnl):
+        """Ejecuta el protocolo de emergencia cuando se viola el límite diario."""
+        print(f"🛑 [KILL SWITCH ACTIVADO] PnL Diario: ${current_pnl:.2f} (Límite: -${self.hard_stop_limit})")
+        self._close_all_positions()
+        self._cancel_pending_orders()
+        self.trading_allowed = False
+        print("🔒 Trading bloqueado por el resto del día.")
+
+    def update(self) -> bool:
+        """
+        Verifica límites de riesgo diario actualizados. 
+        Devuelve True si el trading está permitido, False si está bloqueado.
+        """
         account_info = mt5.account_info()
         if account_info is None:
-            return True # Bloquear si no hay info
+            print("⚠️ No se pudo obtener información de la cuenta.")
+            return False # Bloquear por seguridad si no hay conexión
             
         cet_time = self._get_cet_time()
         
-        # 1. Reset Diario
+        # 1. Reset Automático a la Medianoche (CET/CEST)
         if cet_time.day != self.last_reset_day:
             self.initial_balance = account_info.balance
             self.last_reset_day = cet_time.day
-            self.trading_stopped_today = False
-            print(f"📅 Reset Diario. Balance Inicial fijado en: ${self.initial_balance:.2f} (CET Time: {cet_time.strftime('%Y-%m-%d %H:%M:%S')})")
+            self.trading_allowed = True
+            print(f"📅 [FTMO RESET] Medianoche CET cruzada. Balance Inicial fijado: ${self.initial_balance:.2f}. Trading Permitido.")
             
-        # 2. Cortacorrientes (HARD_STOP_LIMIT = 380)
-        if not self.trading_stopped_today:
-            current_loss = self.initial_balance - account_info.equity
-            if current_loss >= config.HARD_STOP_LIMIT:
-                print(f"🛑 PANIC BUTTON ALCANZADO (Pérdida > ${config.HARD_STOP_LIMIT}). Cerrando todo el mercado.")
-                self._close_all_positions()
-                self.trading_stopped_today = True
+        # 2. Evaluación de Pérdida Diaria (Cerradas + Flotante)
+        if self.trading_allowed:
+            # PnL Diario = Equity Actual - Balance Inicial del Día
+            # (Si equity bajó, el daily_pnl es negativo)
+            daily_pnl = account_info.equity - self.initial_balance
+            
+            if daily_pnl <= -self.hard_stop_limit:
+                self.execute_kill_switch(daily_pnl)
                 
-        return self.trading_stopped_today
+        return self.trading_allowed
 
-    def can_open_trade(self, symbol):
-        """Verifica la matriz de correlación para prevenir exposición excesiva."""
+    def can_open_trade(self, symbol) -> bool:
+        """
+        Verifica el Kill Switch y la matriz de correlación antes de autorizar un trade.
+        """
+        # Si el Kill Switch está activo, se rechaza cualquier trade
+        if not self.trading_allowed:
+            return False
+            
+        # Matriz de Correlación
         positions = mt5.positions_get()
         if positions is None:
             return True
+            
+        if not hasattr(config, 'CURRENCY_EXPOSURE_GROUPS'):
+            return True
         
-        # Encontrar divisas base y quote del símbolo a operar
+        # Extraer divisas base y cotizadas del símbolo a operar
         target_currencies = []
         for currency, symbols_list in config.CURRENCY_EXPOSURE_GROUPS.items():
             if symbol in symbols_list:
                 target_currencies.append(currency)
                 
-        # Contar cuántas posiciones abiertas involucran estas monedas
         exposure_count = {curr: 0 for curr in target_currencies}
         
         for pos in positions:
@@ -104,30 +153,27 @@ class FTMORiskManager:
                 if pos.symbol in config.CURRENCY_EXPOSURE_GROUPS.get(currency, []):
                     exposure_count[currency] += 1
                     
-        # Si alguna de las divisas ya tiene 2 operaciones o más, bloquear
         for currency, count in exposure_count.items():
             if count >= 2:
-                print(f"⚠️ Operación en {symbol} bloqueada por exposición a {currency} (Ya hay {count} trades activos).")
+                print(f"⚠️ Trade en {symbol} denegado. Sobreexposición a {currency} (Operaciones activas: {count}).")
                 return False
                 
         return True
 
     def manage_breakeven(self):
-        """Mueve SL a Break Even si R:R es 1:1."""
+        """Mueve SL a Break Even si el profit flotante iguala el riesgo inicial."""
         positions = mt5.positions_get()
         if positions is None or len(positions) == 0:
             return
             
         for pos in positions:
-            # Solo gestionar posiciones de nuestro bot
-            if pos.magic != config.MAGIC_NUMBER:
+            if hasattr(config, 'MAGIC_NUMBER') and pos.magic != config.MAGIC_NUMBER:
                 continue
                 
             open_price = pos.price_open
             sl = pos.sl
             tp = pos.tp
             
-            # Si no tiene SL, no podemos calcular distancia
             if sl == 0.0:
                 continue
                 
@@ -139,30 +185,24 @@ class FTMORiskManager:
             if tick is None:
                 continue
                 
-            # Calcular profit actual en distancia
             if pos.type == mt5.POSITION_TYPE_BUY:
                 current_profit_dist = tick.bid - open_price
                 if current_profit_dist >= risk_dist and sl < open_price:
-                    # Modificar SL a Break Even
                     self._modify_sl(pos, open_price, tp)
             elif pos.type == mt5.POSITION_TYPE_SELL:
                 current_profit_dist = open_price - tick.ask
                 if current_profit_dist >= risk_dist and sl > open_price:
-                    # Modificar SL a Break Even
                     self._modify_sl(pos, open_price, tp)
 
     def _modify_sl(self, pos, new_sl, tp):
-        """Helper para enviar la orden de modificación de SL."""
         request = {
             "action": mt5.TRADE_ACTION_SLTP,
             "symbol": pos.symbol,
             "position": pos.ticket,
             "sl": new_sl,
             "tp": tp,
-            "magic": config.MAGIC_NUMBER
+            "magic": config.MAGIC_NUMBER if hasattr(config, 'MAGIC_NUMBER') else 0
         }
         result = mt5.order_send(request)
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
-            print(f"❌ Error al mover SL a Break Even (Ticket {pos.ticket}): {result.comment}")
-        else:
-            print(f"🛡️ SL movido a Break Even para posición {pos.ticket} en {pos.symbol}.")
+        if result.retcode == mt5.TRADE_RETCODE_DONE:
+            print(f"🛡️ SL ajustado a Break Even (Ticket {pos.ticket}, {pos.symbol}).")

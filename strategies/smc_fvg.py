@@ -1,105 +1,62 @@
 import pandas as pd
 import numpy as np
-import pytz
 from datetime import datetime, time
 from . import BaseStrategy
 
 class SMC_FVG_Strategy(BaseStrategy):
     """
-    Estrategia SMC FVG (Fair Value Gap) - M15
-    Vectorización de Máquina de Estados para Gaps no mitigados.
+    Estrategia SMC FVG (Fair Value Gap) - M5
+    Detección y mitigación de FVG en la ventana 08:30 - 11:30 CET.
     """
     def __init__(self, name="SMC_FVG"):
         super().__init__(name=name)
 
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
-        # Filtro de Sesión Descentralizado (08:30 a 11:30 CET)
-        tz = pytz.timezone('Europe/Prague')
-        current_time = datetime.now(tz).time()
-        
-        if not (time(8, 30) <= current_time <= time(11, 30)):
-            return None
-            
         df['signal'] = 0
-        if len(df) < 3:
+        if len(df) < 5:
             return df
             
-        # Aseguramos formato datetime
-        if not pd.api.types.is_datetime64_any_dtype(df['time']):
-            df['time'] = pd.to_datetime(df['time'])
-            
-        # 1. Identificación Vectorizada de FVGs (Patrón de 3 velas)
-        # Shift(2) equivale a la Vela 3 (La más antigua del patrón)
-        # Shift(1) equivale a la Vela 2 (Donde está el inbalance)
-        # Shift(0) equivale a la Vela 1 (La vela actual que confirma el gap)
-        df['high_shift_2'] = df['high'].shift(2)
-        df['low_shift_2'] = df['low'].shift(2)
+        df['time'] = pd.to_datetime(df['time'])
+        df['hour'] = df['time'].dt.hour
+        df['minute'] = df['time'].dt.minute
         
-        # Bullish FVG: Máximo de vela 3 es menor al mínimo de vela 1
-        df['is_bull_fvg'] = df['high_shift_2'] < df['low']
-        # Bearish FVG: Mínimo de vela 3 es mayor al máximo de vela 1
-        df['is_bear_fvg'] = df['low_shift_2'] > df['high']
+        # 1. Filtro de Sesión (08:30 a 11:30)
+        is_fvg_window = ((df['hour'] == 8) & (df['minute'] >= 30)) | \
+                        ((df['hour'] > 8) & (df['hour'] < 11)) | \
+                        ((df['hour'] == 11) & (df['minute'] <= 30))
+                        
+        # 2. Detección FVG (Vela 1 = shift(3), Vela 3 = shift(1), actual = 0)
+        bull_fvg_formed = (df['high'].shift(3) < df['low'].shift(1)) & (df['close'].shift(2) > df['open'].shift(2))
+        bear_fvg_formed = (df['low'].shift(3) > df['high'].shift(1)) & (df['close'].shift(2) < df['open'].shift(2))
         
-        # 2. Extracción de propiedades del gap
-        df['fvg_type'] = np.where(df['is_bull_fvg'], 1, np.where(df['is_bear_fvg'], -1, np.nan))
-        df['fvg_high'] = np.where(df['is_bull_fvg'], df['low'], np.where(df['is_bear_fvg'], df['low_shift_2'], np.nan))
-        df['fvg_low'] = np.where(df['is_bull_fvg'], df['high_shift_2'], np.where(df['is_bear_fvg'], df['high'], np.nan))
-        df['fvg_mid'] = (df['fvg_high'] + df['fvg_low']) / 2.0
-        df['fvg_sl_base'] = np.where(df['is_bull_fvg'], df['low_shift_2'], np.where(df['is_bear_fvg'], df['high_shift_2'], np.nan))
+        # Marcar los límites del FVG en el instante que se forman
+        df['bull_top'] = np.where(bull_fvg_formed & is_fvg_window, df['low'].shift(1), np.nan)
+        df['bull_bot'] = np.where(bull_fvg_formed & is_fvg_window, df['high'].shift(3), np.nan)
         
-        # 3. Tracking del Ciclo de Vida del FVG (Máquina de Estados)
-        # Asignar un ID único a cada gap
-        df['fvg_id'] = (df['is_bull_fvg'] | df['is_bear_fvg']).cumsum()
-        df['fvg_id'] = df['fvg_id'].replace(0, np.nan)
+        df['bear_top'] = np.where(bear_fvg_formed & is_fvg_window, df['low'].shift(3), np.nan)
+        df['bear_bot'] = np.where(bear_fvg_formed & is_fvg_window, df['high'].shift(1), np.nan)
         
-        # Forward fill properties
-        df['fvg_type'] = df['fvg_type'].ffill()
-        df['fvg_high'] = df['fvg_high'].ffill()
-        df['fvg_low'] = df['fvg_low'].ffill()
-        df['fvg_mid'] = df['fvg_mid'].ffill()
-        df['fvg_sl_base'] = df['fvg_sl_base'].ffill()
-        df['fvg_id'] = df['fvg_id'].ffill()
+        # Propagar valores temporalmente (solo dentro de la sesión)
+        df['bull_top'] = df['bull_top'].ffill()
+        df['bull_bot'] = df['bull_bot'].ffill()
+        df['bear_top'] = df['bear_top'].ffill()
+        df['bear_bot'] = df['bear_bot'].ffill()
         
-        # 4. Evaluación de Invalidación
-        df['invalidation'] = False
-        df.loc[(df['fvg_type'] == 1) & (df['close'] < df['fvg_low']), 'invalidation'] = True
-        df.loc[(df['fvg_type'] == -1) & (df['close'] > df['fvg_high']), 'invalidation'] = True
+        df['bull_top'] = np.where(is_fvg_window, df['bull_top'], np.nan)
+        df['bull_bot'] = np.where(is_fvg_window, df['bull_bot'], np.nan)
+        df['bear_top'] = np.where(is_fvg_window, df['bear_top'], np.nan)
+        df['bear_bot'] = np.where(is_fvg_window, df['bear_bot'], np.nan)
         
-        # 5. Evaluación de Mitigación (Gatillo)
-        df['mitigation'] = False
-        bull_mitigation = (df['fvg_type'] == 1) & (df['low'] <= df['fvg_mid']) & (df['close'] > df['open'])
-        bear_mitigation = (df['fvg_type'] == -1) & (df['high'] >= df['fvg_mid']) & (df['close'] < df['open'])
+        # 3. Mitigación (Entrada) cuando el precio retrocede y toca la zona
+        buy_cond = is_fvg_window & (df['low'] <= df['bull_top']) & (df['low'].shift(1) > df['bull_top'])
+        sell_cond = is_fvg_window & (df['high'] >= df['bear_bot']) & (df['high'].shift(1) < df['bear_bot'])
         
-        df.loc[bull_mitigation | bear_mitigation, 'mitigation'] = True
+        df.loc[buy_cond, 'signal'] = 1
+        df.loc[sell_cond, 'signal'] = -1
         
-        # 6. Filtrar gaps ya consumidos (para evitar múltiples señales del mismo FVG)
-        df['consumed_event'] = df['invalidation'] | df['mitigation']
-        # Usamos shift(1) para saber si AL EMPEZAR LA VELA ACTUAL el gap ya estaba consumido
-        df['already_consumed'] = df.groupby('fvg_id')['consumed_event'].cumsum().shift(1).fillna(0) > 0
-        
-        # 7. Señal Final
-        df['valid_buy_trigger'] = bull_mitigation & ~df['already_consumed']
-        df['valid_sell_trigger'] = bear_mitigation & ~df['already_consumed']
-        
-        df.loc[df['valid_buy_trigger'], 'signal'] = 1
-        df.loc[df['valid_sell_trigger'], 'signal'] = -1
-        
-        # 9. Cálculo Estructural de SL y TP
-        pip = 0.0001
-        
-        # SL forzado mínimo a 5 pips desde la base
-        df['sl_buy'] = np.minimum(df['fvg_sl_base'] - pip, df['close'] - (5 * pip))
-        df['sl_sell'] = np.maximum(df['fvg_sl_base'] + pip, df['close'] + (5 * pip))
-        
-        df['sl'] = np.where(df['signal'] == 1, df['sl_buy'], 
-                   np.where(df['signal'] == -1, df['sl_sell'], 0.0))
-                   
-        risk = np.abs(df['close'] - df['sl'])
-        
-        # TP Asimétrico Fijo a 1:3
-        df['tp'] = np.where(df['signal'] == 1, df['close'] + (risk * 3.0),
-                   np.where(df['signal'] == -1, df['close'] - (risk * 3.0), 0.0))
-                   
-        df['rr_ratio'] = 3.0
+        # SL base en el extremo opuesto del FVG. Main.py sumará el Buffer de ATR + Spread
+        df['sl'] = 0.0
+        df.loc[buy_cond, 'sl'] = df['bull_bot']
+        df.loc[sell_cond, 'sl'] = df['bear_top']
         
         return df

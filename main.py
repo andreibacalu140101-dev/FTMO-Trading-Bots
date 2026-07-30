@@ -8,15 +8,10 @@ import traceback
 import config
 from risk_manager import FTMORiskManager
 
-# Importar las 7 estrategias
+# Importar solo las estrategias validadas para Forward Testing
 from strategies import (
-    HiddenDivergenceStrategy,
     NY_ORB_Strategy,
-    NightScalperStrategy,
-    SMC_FVG_Strategy,
-    TrendMomentumStrategy,
-    VWAP_Pullback_Strategy,
-    VolatilityBreakoutStrategy
+    SMC_FVG_Strategy
 )
 
 def log(msg):
@@ -73,13 +68,12 @@ def calculate_volume(symbol, sl_price, entry_price):
     """Calcula el lotaje dinámico basado en el porcentaje de riesgo del balance."""
     symbol_info = mt5.symbol_info(symbol)
     if symbol_info is None:
-        return 0.01 # Fallback
+        return 0.01 
         
     account_info = mt5.account_info()
     if account_info is None:
         return 0.01
         
-    # Cálculo dinámico basado en el balance actual de la cuenta
     risk_percent = getattr(config, 'RISK_PER_TRADE_PERCENT', 0.5)
     risk_usd = account_info.balance * (risk_percent / 100.0)
     
@@ -91,7 +85,6 @@ def calculate_volume(symbol, sl_price, entry_price):
     tick_value = symbol_info.trade_tick_value
     tick_size = symbol_info.trade_tick_size
     
-    # Pérdida de 1 lote = (risk_dist / tick_size) * tick_value
     if tick_size == 0 or tick_value == 0:
         return symbol_info.volume_min
         
@@ -101,7 +94,6 @@ def calculate_volume(symbol, sl_price, entry_price):
         
     volume = risk_usd / loss_for_one_lot
     
-    # Normalizar volumen
     step = symbol_info.volume_step
     volume = round(volume / step) * step
     volume = max(symbol_info.volume_min, min(volume, symbol_info.volume_max))
@@ -109,76 +101,97 @@ def calculate_volume(symbol, sl_price, entry_price):
     return volume
 
 def execute_trade(symbol, signal_dict):
-    """Ejecuta la orden en MT5 a mercado usando los datos de la señal."""
-    order_type = mt5.ORDER_TYPE_BUY if signal_dict['signal_type'] == "BUY" else mt5.ORDER_TYPE_SELL
-    
-    tick = mt5.symbol_info_tick(symbol)
-    if tick is None:
-        log(f"❌ Error al obtener precio actual para {symbol}")
-        return
+    """Ejecuta la orden en MT5 a mercado usando bloque try-except."""
+    try:
+        order_type = mt5.ORDER_TYPE_BUY if signal_dict['signal_type'] == "BUY" else mt5.ORDER_TYPE_SELL
         
-    price = tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid
-    volume = calculate_volume(symbol, signal_dict['sl'], price)
-    
-    request = {
-        "action": mt5.TRADE_ACTION_DEAL,
-        "symbol": symbol,
-        "volume": volume,
-        "type": order_type,
-        "price": price,
-        "sl": signal_dict['sl'],
-        "tp": signal_dict['tp'],
-        "deviation": 20,
-        "magic": getattr(config, 'MAGIC_NUMBER', 777000),
-        "comment": signal_dict['strategy_name'][:15],
-        "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
-    }
-    
-    result = mt5.order_send(request)
-    if result.retcode != mt5.TRADE_RETCODE_DONE:
-        log(f"❌ Rechazo de orden {symbol} ({signal_dict['strategy_name']}): {result.comment}")
-    else:
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is None:
+            log(f"❌ Error al obtener precio actual para {symbol}")
+            return False
+            
+        price = tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid
+        
+        # Actualizamos TP para forzar R:R de 1:2 basado en el nuevo SL final (con buffer)
+        final_sl = signal_dict['sl']
+        risk_dist = abs(price - final_sl)
+        
+        if order_type == mt5.ORDER_TYPE_BUY:
+            final_tp = price + (risk_dist * 2.0)
+        else:
+            final_tp = price - (risk_dist * 2.0)
+            
+        volume = calculate_volume(symbol, final_sl, price)
+        
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": volume,
+            "type": order_type,
+            "price": price,
+            "sl": final_sl,
+            "tp": final_tp,
+            "deviation": 20,
+            "magic": getattr(config, 'MAGIC_NUMBER', 777000),
+            "comment": signal_dict['strategy_name'][:15],
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+        
+        result = mt5.order_send(request)
+        if result.retcode != mt5.TRADE_RETCODE_DONE:
+            log(f"❌ Rechazo de orden {symbol} ({signal_dict['strategy_name']}): {result.comment} (Code: {result.retcode})")
+            return False
+            
         log(f"🚀 ¡Orden EXITOSA! {signal_dict['signal_type']} en {symbol}. Vol: {volume}, Ticket: {result.order}")
+        return True
+        
+    except Exception as e:
+        log(f"🔥 Excepción crítica al ejecutar trade: {str(e)}")
+        log(traceback.format_exc())
+        return False
 
 def main():
     if not initialize_mt5():
         return
 
-    log("🤖 Orquestador Principal (Cerebro) Iniciado. Cuenta fondeo FTMO $10,000.")
+    log("🤖 Orquestador Principal (Cerebro) Iniciado. Forward Testing FTMO.")
     
-    # Instanciar Gestor de Riesgos
     risk_manager = FTMORiskManager()
     
-    # Instanciar el arsenal de 7 estrategias
+    # 5 estrategias desactivadas temporalmente, conservamos las 2 validadas
     strategies = {
-        "HiddenDivergence": HiddenDivergenceStrategy(),
         "NY_ORB": NY_ORB_Strategy(),
-        "NightScalper": NightScalperStrategy(),
-        "SMC_FVG": SMC_FVG_Strategy(),
-        "TrendMomentum": TrendMomentumStrategy(),
-        "VWAP_Pullback": VWAP_Pullback_Strategy(),
-        "VolatilityBreakout": VolatilityBreakoutStrategy()
+        "SMC_FVG": SMC_FVG_Strategy()
     }
     
-    log(f"🧠 {len(strategies)} Estrategias cargadas y listas.")
+    log(f"🧠 {len(strategies)} Estrategias cargadas (SMC_FVG y NY_ORB) y listas.")
     
-    # Activar símbolos en Market Watch
-    symbols_to_trade = getattr(config, 'SYMBOLS', ["EURUSD"])
+    symbols_to_trade = getattr(config, 'SYMBOLS', ["EURUSD", "XAUUSD"])
     for symbol in symbols_to_trade:
         mt5.symbol_select(symbol, True)
         
-    last_trade_time = {} # Diccionario Anti-Spam de señales
+    # Variables de Estado Global
+    state_current_day = ""
+    state_trades_today = {
+        "SMC_FVG": 0,
+        "NY_ORB": 0
+    }
         
-    # Bucle Principal de Alta Frecuencia Segura
     try:
         while True:
             try:
+                # Actualizar reloj de estado (Medianoche reset)
+                current_day_str = risk_manager._get_cet_time().strftime('%Y-%m-%d')
+                if current_day_str != state_current_day:
+                    state_current_day = current_day_str
+                    state_trades_today["SMC_FVG"] = 0
+                    state_trades_today["NY_ORB"] = 0
+                    log(f"📅 Nuevo Día Detectado ({current_day_str}). Contadores de estrategia reiniciados.")
+                    
                 # PASO 1: Riesgo Global (Kill Switch)
                 trading_allowed = risk_manager.update()
                 if not trading_allowed:
-                    # El Kill Switch se activó por superar la pérdida límite de -$380.
-                    # Saltamos el ciclo (no evaluamos estrategias).
                     time.sleep(10)
                     continue
                     
@@ -187,7 +200,6 @@ def main():
                 
                 # PASO 3: Evaluación Símbolo a Símbolo
                 for symbol in symbols_to_trade:
-                    # A. Filtro Institucional de Spread en Vivo
                     tick = mt5.symbol_info_tick(symbol)
                     symbol_info = mt5.symbol_info(symbol)
                     
@@ -198,17 +210,14 @@ def main():
                     current_spread_pips = (tick.ask - tick.bid) / pip_size
                     
                     if current_spread_pips > getattr(config, 'MAX_SPREAD_PIPS', 1.5):
-                        # Spread brutal detectado, descartar este símbolo en esta iteración
                         continue
                         
-                    # Obtener 100 velas (Suficiente para EMAs grandes como la de 200 en H1)
-                    # Usamos M15 por defecto, aunque cada estrategia podría requerir su propio timeframe
-                    # Aquí estandarizamos a la obtención de velas solicitada.
-                    df = fetch_rates_with_retry(symbol, getattr(config, 'TIMEFRAME', mt5.TIMEFRAME_M15), 300)
+                    # M5 Timeframe recomendado para estas estrategias institucionales
+                    df = fetch_rates_with_retry(symbol, getattr(config, 'TIMEFRAME', mt5.TIMEFRAME_M5), 300)
                     if df is None or len(df) < 15:
                         continue
                         
-                    # B. Filtro MACRO de Volatilidad (ATR de 14 periodos)
+                    # Filtro MACRO de Volatilidad (ATR de 14 periodos)
                     df['tr0'] = abs(df['high'] - df['low'])
                     df['tr1'] = abs(df['high'] - df['close'].shift())
                     df['tr2'] = abs(df['low'] - df['close'].shift())
@@ -216,28 +225,24 @@ def main():
                     atr_14 = tr.rolling(14).mean().iloc[-1] / pip_size
                     
                     if atr_14 < getattr(config, 'MIN_ATR_PIPS', 3.0):
-                        # Mercado en rango estrecho sin direccionalidad, abortar
                         continue
                         
                     best_signal = None
                     
                     for name, strategy in strategies.items():
-                        # Usamos evaluate() que procesa generate_signals(df) internamente y aplica Anti-Repaint
+                        # Si ya agotamos la bala diaria de esta estrategia, la ignoramos.
+                        if state_trades_today.get(name, 0) >= 1:
+                            continue
+                            
                         signal = strategy.evaluate(df, symbol)
-                        
                         if signal is not None:
-                            # Filtro: Nos quedamos con la señal que ofrezca mejor R:R
                             if best_signal is None or signal.get('rr_ratio', 0) > best_signal.get('rr_ratio', 0):
                                 best_signal = signal
                                 
                     # PASO 4: Ejecución de Órdenes
                     if best_signal is not None:
-                        # Mecanismo Anti-Spam: Prevenir disparar 100 veces en la misma vela si la orden falla o ya se abrió
-                        signal_time = df.iloc[-1]['time']
-                        if symbol in last_trade_time and last_trade_time[symbol] == signal_time:
-                            continue # Ya intentamos disparar en esta misma vela, ignorar hasta la siguiente
-                            
-                        # Preguntar al Gestor de Riesgo si la matriz de exposición y el filtro de horario permiten el trade
+                        strategy_name = best_signal['strategy_name']
+                        
                         if risk_manager.can_open_trade(symbol, best_signal):
                             # ==========================================
                             # 🛡️ BUFFER INSTITUCIONAL DE STOP LOSS
@@ -256,17 +261,19 @@ def main():
                                 else:
                                     best_signal['sl'] += total_buffer
                                     
-                            log(f"🎯 Señal detectada: {best_signal['signal_type']} en {symbol} vía {best_signal['strategy_name']} (R:R {best_signal.get('rr_ratio',0):.2f})")
-                            execute_trade(symbol, best_signal)
-                            last_trade_time[symbol] = signal_time # Registrar disparo para no repetir en esta vela
+                            log(f"🎯 Señal detectada: {best_signal['signal_type']} en {symbol} vía {strategy_name}")
+                            
+                            success = execute_trade(symbol, best_signal)
+                            if success:
+                                # Consumir la bala diaria de esta estrategia
+                                state_trades_today[strategy_name] += 1
+                                log(f"🔒 Estrategia {strategy_name} bloqueada por el resto del día ({state_current_day}).")
                             
             except Exception as e:
-                # Catch-all para que el bot nunca crashee por excepciones en tiempo de ejecución
                 log(f"🔥 Error en el Bucle Principal: {str(e)}")
                 log(traceback.format_exc())
-                time.sleep(5) # Pausa por si es un error repetitivo
+                time.sleep(5)
                 
-            # Sleep final del ciclo para descargar la CPU (Heartbeat)
             time.sleep(getattr(config, 'TICK_SLEEP', 1.0))
             
     except KeyboardInterrupt:
